@@ -1,0 +1,10 @@
+---
+title: "PML Course Project"
+author: "Shayn Weidner"
+date: "October 19, 2018"
+output: html_document
+---
+
+```{r echo = TRUE}
+
+```
