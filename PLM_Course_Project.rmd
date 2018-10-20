@@ -1,10 +1,210 @@
 ---
 title: "PML Course Project"
 author: "Shayn Weidner"
-date: "October 19, 2018"
+date: "October 20, 2018"
 output: html_document
 ---
 
-```{r echo = TRUE}
+#Summary
+The goal of this project is to ultimately to predict the manner in which an individual did an exercise (how well).  This is done using data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.  We are not interested in interpretability, but on predictive accuracy.
+
+We ultimately build 5 different ML models and ensemble them together (a single random forest performed very well by itself, and therefore would probably have sufficed).  The result is a perfect score on a sample of 20 holdout samples.
+
+##Load in Libraries and read in data
+Rather than bother with setting wd's and checking files, I'm letting R read directly from the source.  Please note that this analysis was performed on 10/20/18, and thus the files were as of that date.
+
+```{r message=FALSE}
+library(caret)
+library(e1071)
+library(ranger)
+Training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+Testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+
+##Exploratory Analysis and Data Cleaning/Pre-processing
+Looking at a summary of the dataset (not shown), I see that there are many fields that are heavily filled with NAs and blanks.  To summarize:
+
+```{r cache = TRUE}
+CountNAsByCol <- data.frame(apply(Training, 2, function(x){sum(is.na(x))}))
+table(CountNAsByCol)#related to new_window, so we'll leave new_window
+CountBlanksByCol <- data.frame(apply(Training, 2, function(x){sum(x == "")}))
+table(CountBlanksByCol)
+```
+
+As can be seen, there are 67 columns that have exactly 19216 NAs, and 33 columns that have 19216 blank values.  It turns out that this is related to the "new_window" field.  I'll just drop those 67+33=100 columns since I don't expect their non-NA/non-blank rows to add much value.
+
+
+```{r cache = TRUE}
+DropCols <- which(names(Training) %in%
+                    c(
+                      row.names(CountNAsByCol)[CountNAsByCol == 19216],
+                      row.names(CountBlanksByCol)[CountBlanksByCol == 19216],
+                      "X",
+                      "raw_timestamp_part_1",
+                      "raw_timestamp_part_2",
+                      "cvtd_timestamp"))#also adding "X" and timestamps.  X is just a row indicator, and I don't want to use timestamps as predictors
+Training <- Training[,-DropCols]
+SkewedPredictors<-format(data.frame(apply(Training[,lapply(Training, class) %in% "numeric"], 2, function(x){skewness(x)})), scientific=FALSE)
+#SkewedPredictors
 
 ```
+
+The skewness suggests that there may be someting wrong with a few variables (full list of skewness measurements not shown). Looking at the predictors where the skewness is > 10 or < -10:
+
+```{r cache = TRUE}
+
+SketchyColumns <- row.names(SkewedPredictors)[which(abs(as.numeric(SkewedPredictors[,1])) > 10)]
+SketchyColumns
+apply(Training[,SketchyColumns], 2, function(x){which(abs(x) == max(abs(x)))})
+```
+
+One observation, row 5373, appears to be responsible for all of the extremly skewed fields.  I'll remove it.
+
+```{r cache = TRUE}
+Training <- Training[-5373,]
+```
+
+Now we center and scale everything.  I also verify that the fields all have mean of zero and sd of 1:
+
+
+```{r cache = TRUE, warning=FALSE}
+CenterAndScale <- preProcess(Training, 
+                     method = c('center', 'scale'))
+Training_processed <- predict(CenterAndScale,Training)
+Testing <- Testing[,-DropCols]
+Testing_processed <- predict(CenterAndScale,Testing)
+#verify it worked:
+summary(apply(Training_processed, 2, function(x){sd(x)}))
+summary(apply(Training_processed, 2, function(x){mean(as.numeric(x))}))
+```
+
+
+Many algorithms can have issues if you have constant columns or nearly-constant columns (near zero variance).  I will check
+
+```{r cache = TRUE, warning=FALSE}
+MyNZV<-nearZeroVar(Training_processed, saveMetrics= TRUE)
+MyNZV[MyNZV$zeroVar | MyNZV$nzv,]
+```
+
+Only the field "new_window" is like this.  Recall that this was related to the many NA and blank values in fields that I ended up removing.  I choose to leave this field in case the ML algorithms might pick up on something.
+
+Now I partition my data into training and validation sets (this course used the terms "testing" and "validation" opposite of how I normally have used them in practice; I use their term of "testing"):
+```{r cache = TRUE, warning=FALSE}
+set.seed(54321)
+TrainIndex <- createDataPartition(y = Training_processed$classe, p = .8, list = FALSE)
+TrainForModel <- Training_processed[TrainIndex,]
+TestForModel <- Training_processed[-TrainIndex,]
+```
+
+
+
+##Building Predictive Models
+Now the fun stuff.  I build a Random Forest, a decision tree, a Gradient Boosted Machine, a Linear Discriminant Analysis model, and a Support Vector Machine.  My preferred random forest implementation is the ranger package, due to it's speed.  It *is* available in the caret package, but for time's sake I am not going to worry about tinkering with hyperparameters; caret would try to optimize hyperparameters and take **forever**.
+
+```{r cache = TRUE, warning=FALSE}
+set.seed(12321)
+MyRF <- ranger(classe ~ .,
+               data = TrainForModel,
+               num.trees = 1000,
+               mtry = 20,
+               replace=FALSE,
+               verbose = FALSE)
+confusionMatrix(TrainForModel$classe,MyRF$predictions)$overall[1]
+confusionMatrix(TestForModel$classe,predict(MyRF,data=TestForModel)$predictions)$overall[1]
+```
+
+Random Forest looks great!
+
+For the next four algorithms, I let caret do 5-fold cross validation.  I otherwise stick with the default hyperparameter tuning that caret performs.
+
+```{r cache = TRUE, warning=FALSE}
+MyFitControl <- trainControl(
+  method = "cv",
+  number = 5)
+
+set.seed(12321)
+MyRPart <- train(classe~.,
+                 data=TrainForModel,
+                 method="rpart",
+                 trControl=MyFitControl,
+                 metric = "Accuracy")
+confusionMatrix(TrainForModel$classe,predict(MyRPart,TrainForModel))$overall[1]
+confusionMatrix(TestForModel$classe,predict(MyRPart,TestForModel))$overall[1]
+```
+
+This one is pretty bad.  It actually doesn't predict any of the "D" classes.
+
+
+```{r cache = TRUE, warning=FALSE}
+set.seed(12321)
+MyGBM <- train(classe~.,
+               data=TrainForModel,
+               method="gbm",
+               trControl=MyFitControl,
+               metric = "Accuracy",
+               verbose=FALSE)
+confusionMatrix(TrainForModel$classe,predict(MyGBM,TrainForModel))$overall[1]
+confusionMatrix(TestForModel$classe,predict(MyGBM,TestForModel))$overall[1]
+```
+
+Of course the GBM looks good, too.
+
+```{r cache = TRUE, warning=FALSE}
+set.seed(12321)
+MyLDA <- train(classe~.,
+               data=TrainForModel,
+               method="lda",
+               trControl=MyFitControl,
+               metric = "Accuracy")
+confusionMatrix(TrainForModel$classe,predict(MyLDA,TrainForModel))$overall[1]
+confusionMatrix(TestForModel$classe,predict(MyLDA,TestForModel))$overall[1]
+```
+
+The LDA (above) and the SVM (below) don't look great.
+
+```{r cache = TRUE, warning=FALSE}
+set.seed(12321)
+MySVM <- train(classe~.,
+               data=TrainForModel,
+               method="svmLinear",
+               trControl=MyFitControl,
+               metric = "Accuracy")
+confusionMatrix(TrainForModel$classe,predict(MySVM,TrainForModel))$overall[1]
+confusionMatrix(TestForModel$classe,predict(MySVM,TestForModel))$overall[1]
+```
+
+
+Even though the RF model looks so good, I'll ensemble just for fun :)
+
+```{r cache = TRUE, warning=FALSE}
+EnsembleDF_test <- data.frame(classe = TestForModel$classe,
+                               RF=predict(MyRF,data=TestForModel)$predictions,
+                               RPart=predict(MyRPart,TestForModel),
+                               GBM=predict(MyGBM,TestForModel),
+                               LDA=predict(MyLDA,TestForModel),
+                               SVM=predict(MySVM,TestForModel))
+
+EnsembleDF_submission <- data.frame(RF=predict(MyRF,data=Testing_processed)$predictions,
+                                    RPart=predict(MyRPart,Testing_processed),
+                                    GBM=predict(MyGBM,Testing_processed),
+                                    LDA=predict(MyLDA,Testing_processed),
+                                    SVM=predict(MySVM,Testing_processed))
+
+set.seed(12321)
+MyEnsemble <- ranger(classe ~ .,
+                        data = EnsembleDF_test,
+                        num.trees = 1000,
+                        mtry = 3,
+                        replace=FALSE,
+                        verbose = FALSE)
+confusionMatrix(EnsembleDF_test$classe,predict(MyEnsemble,data=EnsembleDF_test)$predictions)$overall[1]
+```
+
+Still looking good.  I'll use this to predict my Quiz 4 submission.  With this I can't exactly say what my expected out-of-sample error is.  However, considering that the RF is basically the workhorse in this ensemble, I'd say that the OOS error is approximately equal to the estimated OOS error from the RF model, `r paste0(formatC(100 * (1- confusionMatrix(TestForModel$classe,predict(MyRF,data=TestForModel)$predictions)$overall[1]), format = "f", digits = 3), "%")`
+
+```{r cache = TRUE, warning=FALSE}
+data.frame(MyQuizSubmission = predict(MyEnsemble,data=EnsembleDF_submission)$predictions)
+```
+
+As it turns out, this gets a score of 100% on the Quiz.
